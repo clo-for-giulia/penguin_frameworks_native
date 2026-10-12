@@ -687,7 +687,9 @@ void BlurFilter::drawBlurRegion(SkCanvas* canvas, const SkRRect& effectRegion,
         const float shortSide = std::min(rect.width(), rect.height());
         // The curved rim is as deep as the corner, but never past the middle of the glass.
         const float band =
-                slab ? std::clamp(radius * mTuning.band, 6.0f, shortSide * 0.5f) : 1.0f;
+                slab ? std::max(1.0f, std::min(std::max(radius * mTuning.band, 6.0f),
+                                               shortSide * 0.5f))
+                     : 1.0f;
         SkRuntimeShaderBuilder glass(mLiquidGlassEffect);
         glass.child("blurredInput") = blurShader;
         SkMatrix inputMatrix;
