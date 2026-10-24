@@ -130,7 +130,10 @@ cc_library_shared {
     cflags: [
         "-Wall",
         "-Werror",
-    ],
+    ] + select(soong_config_variable("dolby_vision", "target_supports_dolby_vision"), {
+        true: ["-DTARGET_SUPPORTS_DOLBY_VISION"],
+        default: [],
+    }),
     cppflags: [
         "-Wextra",
     ],
