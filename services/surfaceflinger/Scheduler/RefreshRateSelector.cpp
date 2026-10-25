@@ -1002,7 +1002,9 @@ auto RefreshRateSelector::getRankedFrameRatesLocked(const std::vector<LayerRequi
     // Now that we scored all the refresh rates we need to pick the one that got the highest
     // overallScore. Sort the scores based on their overallScore in descending order of priority.
     const RefreshRateOrder refreshRateOrder =
-            maxVoteLayers > 0 ? RefreshRateOrder::Descending : RefreshRateOrder::Ascending;
+            (maxVoteLayers > 0 || isAppTouchBoost || signals.touch)
+                    ? RefreshRateOrder::Descending
+                    : RefreshRateOrder::Ascending;
     std::sort(scores.begin(), scores.end(),
               RefreshRateScoreComparator{.refreshRateOrder = refreshRateOrder});
 
@@ -1050,15 +1052,11 @@ auto RefreshRateSelector::getRankedFrameRatesLocked(const std::vector<LayerRequi
         }
     };
 
-    const auto isTouchBoostForCategory = [&]() -> bool {
-        return explicitCategoryVoteLayers + noVoteLayers + explicitGteLayers != layers.size();
-    };
-
     // This accounts for cases such as games that use `setFrameRate` with Default
     // compatibility to limit the frame rate, which should not have touch boost.
     const bool isLateGlobalTouchBoost = signals.touch && explicitDefaultVoteLayers == 0;
     const bool isLateTouchBoost = isLateGlobalTouchBoost || isAppTouchBoost;
-    if (isLateTouchBoost && isTouchBoostForExplicitExact() && isTouchBoostForCategory()) {
+    if (isLateTouchBoost && isTouchBoostForExplicitExact()) {
         const auto touchRefreshRates = rankFrameRates(anchorGroup, RefreshRateOrder::Descending);
         using fps_approx_ops::operator<;
 
