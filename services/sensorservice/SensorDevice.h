@@ -164,6 +164,7 @@ private:
     // Info is a per-sensor data structure which contains the batch parameters for each client that
     // has registered for this sensor.
     struct Info {
+        int32_t handle = -1;
         BatchParams bestBatchParams;
         // Key is the unique identifier(ident) for each client, value is the batch parameters
         // requested by the client.
@@ -235,6 +236,8 @@ private:
 
     bool isClientDisabled(void* ident) const;
     bool isClientDisabledLocked(void* ident) const;
+    bool isClientDisabledLocked(void* ident, int handle) const;
+    bool isWakeUpSensor(int handle) const;
     std::vector<void*> getDisabledClientsLocked() const;
 
     void updateSensorActivationsForIdentLocked(void* ident);

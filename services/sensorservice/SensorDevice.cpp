@@ -127,6 +127,7 @@ void SensorDevice::initializeSensorList() {
         }
         mSensorList.push_back(sensor);
 
+        model.handle = list[i].handle;
         mActivationCount.add(list[i].handle, model);
 
         // Only disable all sensors on HAL 1.0 since HAL 2.0
@@ -262,6 +263,7 @@ void SensorDevice::handleDynamicSensorConnection(int handle, bool connected) {
     // not need to check mSensors because this is is only called after successful poll()
     if (connected) {
         Info model;
+        model.handle = handle;
         mActivationCount.add(handle, model);
         mHalWrapper->activate(handle, 0 /* enabled */);
     } else {
@@ -491,7 +493,7 @@ status_t SensorDevice::activateLocked(void* ident, int handle, int enabled) {
     if (enabled) {
         ALOGD_IF(DEBUG_CONNECTIONS, "enable index=%zd", info.batchParams.indexOfKey(ident));
 
-        if (isClientDisabledLocked(ident)) {
+        if (isClientDisabledLocked(ident, handle)) {
             ALOGW("SensorDevice::activate, isClientDisabledLocked(%p):true, handle:%d", ident,
                   handle);
             return NO_ERROR;
@@ -536,7 +538,7 @@ status_t SensorDevice::activateLocked(void* ident, int handle, int enabled) {
             // sensor wasn't enabled for this ident
         }
 
-        if (isClientDisabledLocked(ident)) {
+        if (isClientDisabledLocked(ident, handle)) {
             return NO_ERROR;
         }
     }
@@ -660,6 +662,28 @@ bool SensorDevice::isClientDisabled(void* ident) const {
 
 bool SensorDevice::isClientDisabledLocked(void* ident) const {
     return mDisabledClients.count(ident) > 0;
+}
+
+bool SensorDevice::isClientDisabledLocked(void* ident, int handle) const {
+    auto it = mDisabledClients.find(ident);
+    if (it == mDisabledClients.end()) {
+        return false;
+    }
+    // Keep wakeup sensors alive for a frozen client. Screen-off gestures (for example the
+    // pick-up sensor registered by SystemUI) must still be able to activate and wake the app.
+    if (it->second == (1 << DISABLED_REASON_PID_FROZEN) && isWakeUpSensor(handle)) {
+        return false;
+    }
+    return true;
+}
+
+bool SensorDevice::isWakeUpSensor(int handle) const {
+    for (const auto& sensor : mSensorList) {
+        if (sensor.handle == handle) {
+            return (sensor.flags & SENSOR_FLAG_WAKE_UP) != 0;
+        }
+    }
+    return false;
 }
 
 std::vector<void*> SensorDevice::getDisabledClientsLocked() const {
@@ -881,7 +905,7 @@ int SensorDevice::Info::numActiveClients() const {
     SensorDevice& device(SensorDevice::getInstance());
     int num = 0;
     for (size_t i = 0; i < batchParams.size(); ++i) {
-        if (!device.isClientDisabledLocked(batchParams.keyAt(i))) {
+        if (!device.isClientDisabledLocked(batchParams.keyAt(i), handle)) {
             ++num;
         }
     }
@@ -908,7 +932,7 @@ void SensorDevice::Info::selectBatchParams() {
     SensorDevice& device(SensorDevice::getInstance());
 
     for (size_t i = 0; i < batchParams.size(); ++i) {
-        if (device.isClientDisabledLocked(batchParams.keyAt(i))) {
+        if (device.isClientDisabledLocked(batchParams.keyAt(i), handle)) {
             continue;
         }
         bestParams.merge(batchParams[i]);
