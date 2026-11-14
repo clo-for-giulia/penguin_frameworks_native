@@ -1211,6 +1211,12 @@ compositionengine::Output::ColorProfile Output::pickColorProfile(
             break;
         default: // vendor display color setting
             intent = static_cast<ui::RenderIntent>(refreshArgs.outputColorSetting);
+            // Vendor color settings are global, but a follower display may not expose
+            // the same vendor render intents as the primary display.
+            if (!mDisplayColorProfile->hasRenderIntent(intent)) {
+                intent = isHdr ? ui::RenderIntent::TONE_MAP_COLORIMETRIC
+                               : ui::RenderIntent::COLORIMETRIC;
+            }
             break;
     }
 

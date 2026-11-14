@@ -382,6 +382,20 @@ static float tune(const char* name, float fallback) {
 
 void BlurFilter::setDisplay(const std::string& namePlusId) {
     mLiquidGlass = mLiquidGlassEffect != nullptr && liquidGlassEnabledFor(namePlusId);
+    if (!mLiquidGlass) return;
+    const uint32_t serial = __system_property_area_serial();
+    if (serial == mTuningSerial) return;
+    mTuningSerial = serial;
+    mTuning.band = tune("band", 0.6f);
+    mTuning.clarity = tune("clarity", 0.0f);
+    mTuning.rim = tune("rim", 0.0f);
+    mTuning.slabSaturation = tune("slab_sat", 1.1f);
+    mTuning.windowSaturation = tune("window_sat", 0.5f);
+    mTuning.slabGain = tune("slab_gain", 0.9f);
+    mTuning.windowGain = tune("window_gain", 1.04f);
+    mTuning.slabLift = tune("slab_lift", 0.0f);
+    mTuning.windowLift = tune("window_lift", 0.02f);
+    mTuning.edgeClear = tune("edge_clear", 0.08f);
 }
 
 // The rim lens of a glass slab (see LENS_SKSL), in the region's own coordinates. A zero shift
@@ -673,7 +687,9 @@ void BlurFilter::drawBlurRegion(SkCanvas* canvas, const SkRRect& effectRegion,
         const float shortSide = std::min(rect.width(), rect.height());
         // The curved rim is as deep as the corner, but never past the middle of the glass.
         const float band =
-                slab ? std::clamp(radius * tune("band", 0.6f), 6.0f, shortSide * 0.5f) : 1.0f;
+                slab ? std::max(1.0f, std::min(std::max(radius * mTuning.band, 6.0f),
+                                               shortSide * 0.5f))
+                     : 1.0f;
         SkRuntimeShaderBuilder glass(mLiquidGlassEffect);
         glass.child("blurredInput") = blurShader;
         SkMatrix inputMatrix;
@@ -685,17 +701,17 @@ void BlurFilter::drawBlurRegion(SkCanvas* canvas, const SkRRect& effectRegion,
                         ? input->makeShader(SkTileMode::kMirror, SkTileMode::kMirror,
                                             linearSampling, inputMatrix)
                         : blurShader;
-        glass.uniform("clarity") = tune("clarity", 0.0f);
+        glass.uniform("clarity") = mTuning.clarity;
         glass.uniform("bounds") = SkV4{rect.fLeft, rect.fTop, rect.fRight, rect.fBottom};
         glass.uniform("radius") = radius;
         glass.uniform("band") = band;
         setLensUniforms(glass, glassLens(effectRegion, material, mLiquidGlass));
-        glass.uniform("rim") = slab ? tune("rim", 0.0f) : 0.0f;
+        glass.uniform("rim") = slab ? mTuning.rim : 0.0f;
         // A whole window's backdrop, such as the shade's, gets iOS's vivid blur.
-        glass.uniform("saturation") = slab ? tune("slab_sat", 1.1f) : tune("window_sat", 0.5f);
-        glass.uniform("gain") = slab ? tune("slab_gain", 0.9f) : tune("window_gain", 1.04f);
-        glass.uniform("lift") = slab ? tune("slab_lift", 0.0f) : tune("window_lift", 0.02f);
-        glass.uniform("edgeClear") = tune("edge_clear", 0.08f);
+        glass.uniform("saturation") = slab ? mTuning.slabSaturation : mTuning.windowSaturation;
+        glass.uniform("gain") = slab ? mTuning.slabGain : mTuning.windowGain;
+        glass.uniform("lift") = slab ? mTuning.slabLift : mTuning.windowLift;
+        glass.uniform("edgeClear") = mTuning.edgeClear;
         paint.setShader(glass.makeShader());
         if (slab) {
             paint.setAntiAlias(true);
