@@ -16,12 +16,19 @@
 
 #include "VsyncConfiguration.h"
 
+#include <array>
+#include <charconv>
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
+#include <limits>
 #include <optional>
+#include <string>
+#include <string_view>
 
 #include <cutils/properties.h>
 #include <log/log.h>
+#include <sys/system_properties.h>
 
 #include "SurfaceFlingerProperties.h"
 
@@ -35,6 +42,13 @@ std::optional<nsecs_t> getProperty(const char* name) {
     if (const int i = atoi(value); i != -1) return i;
     return std::nullopt;
 }
+
+// The work duration properties that support per-refresh-rate overrides.
+constexpr std::array<std::string_view, 6> kDurationProps = {
+        "debug.sf.early.sf.duration",   "debug.sf.early.app.duration",
+        "debug.sf.earlyGl.sf.duration", "debug.sf.earlyGl.app.duration",
+        "debug.sf.late.sf.duration",    "debug.sf.late.app.duration",
+};
 
 } // namespace
 
@@ -286,9 +300,75 @@ nsecs_t appDurationToOffset(std::chrono::nanoseconds appDuration,
                             std::chrono::nanoseconds sfDuration, nsecs_t vsyncDuration) {
     return vsyncDuration - (appDuration + sfDuration).count() % vsyncDuration;
 }
+
+// Returns the duration set for the refresh rate closest to |fps|, or nullopt if |propertyName|
+// has no durations set. Ties are resolved towards the lower refresh rate.
+std::optional<nsecs_t> getClosestDuration(const DurationOverrides& overrides,
+                                          const char* propertyName, Fps fps) {
+    const auto it = overrides.find(propertyName);
+    if (it == overrides.end()) {
+        return std::nullopt;
+    }
+
+    std::optional<nsecs_t> duration;
+    float minDelta = std::numeric_limits<float>::max();
+    for (const auto& [candidateFps, candidateDuration] : it->second) {
+        if (const float delta = std::abs(static_cast<float>(candidateFps) - fps.getValue());
+            delta < minDelta) {
+            minDelta = delta;
+            duration = candidateDuration;
+        }
+    }
+    return duration;
+}
 } // namespace
 
+DurationOverrides WorkDuration::getDurationOverrides() const {
+    struct Collector {
+        static void onProperty(void* cookie, const char* name, const char* value, uint32_t) {
+            const std::string_view nameView{name};
+            for (const auto propertyName : kDurationProps) {
+                if (nameView.size() <= propertyName.size() || nameView[propertyName.size()] != '.' ||
+                    !nameView.starts_with(propertyName)) {
+                    continue;
+                }
+
+                const std::string_view fpsString = nameView.substr(propertyName.size() + 1);
+                int fps = 0;
+                const auto [end, error] =
+                        std::from_chars(fpsString.data(), fpsString.data() + fpsString.size(), fps);
+                if (error == std::errc() && end == fpsString.data() + fpsString.size() && fps > 0) {
+                    if (const int duration = atoi(value); duration != -1) {
+                        static_cast<Collector*>(cookie)
+                                ->overrides[std::string(propertyName)]
+                                .emplace(fps, duration);
+                    }
+                }
+                break;
+            }
+        }
+
+        static void onPropertyInfo(const prop_info* pi, void* cookie) {
+            __system_property_read_callback(pi, onProperty, cookie);
+        }
+
+        DurationOverrides overrides;
+    };
+
+    Collector collector;
+    __system_property_foreach(&Collector::onPropertyInfo, &collector);
+    return collector.overrides;
+}
+
 VsyncConfigSet WorkDuration::constructOffsets(nsecs_t vsyncDuration) const {
+    // Read the overrides only when the offsets are constructed, i.e. once per refresh rate.
+    const auto overrides = getDurationOverrides();
+    const auto fps = Fps::fromPeriodNsecs(vsyncDuration);
+
+    const auto duration = [&](const char* propertyName, nsecs_t fallbackDuration) {
+        return getClosestDuration(overrides, propertyName, fps).value_or(fallbackDuration);
+    };
+
     const auto sfDurationFixup = [vsyncDuration](nsecs_t duration) {
         return duration == -1 ? std::chrono::nanoseconds(vsyncDuration) - 1ms
                               : std::chrono::nanoseconds(duration);
@@ -299,12 +379,16 @@ VsyncConfigSet WorkDuration::constructOffsets(nsecs_t vsyncDuration) const {
                               : std::chrono::nanoseconds(duration);
     };
 
-    const auto sfEarlyDuration = sfDurationFixup(mSfEarlyDuration);
-    const auto appEarlyDuration = appDurationFixup(mAppEarlyDuration);
-    const auto sfEarlyGpuDuration = sfDurationFixup(mSfEarlyGpuDuration);
-    const auto appEarlyGpuDuration = appDurationFixup(mAppEarlyGpuDuration);
-    const auto sfDuration = sfDurationFixup(mSfDuration);
-    const auto appDuration = appDurationFixup(mAppDuration);
+    const auto sfEarlyDuration =
+            sfDurationFixup(duration("debug.sf.early.sf.duration", mSfEarlyDuration));
+    const auto appEarlyDuration =
+            appDurationFixup(duration("debug.sf.early.app.duration", mAppEarlyDuration));
+    const auto sfEarlyGpuDuration =
+            sfDurationFixup(duration("debug.sf.earlyGl.sf.duration", mSfEarlyGpuDuration));
+    const auto appEarlyGpuDuration =
+            appDurationFixup(duration("debug.sf.earlyGl.app.duration", mAppEarlyGpuDuration));
+    const auto sfDuration = sfDurationFixup(duration("debug.sf.late.sf.duration", mSfDuration));
+    const auto appDuration = appDurationFixup(duration("debug.sf.late.app.duration", mAppDuration));
 
     return {
             .early =
@@ -356,10 +440,14 @@ VsyncConfigSet WorkDuration::constructOffsets(nsecs_t vsyncDuration) const {
 WorkDuration::WorkDuration(Fps currentRefreshRate)
       : WorkDuration(currentRefreshRate, getProperty("debug.sf.late.sf.duration").value_or(-1),
                      getProperty("debug.sf.late.app.duration").value_or(-1),
-                     getProperty("debug.sf.early.sf.duration").value_or(mSfDuration),
-                     getProperty("debug.sf.early.app.duration").value_or(mAppDuration),
-                     getProperty("debug.sf.earlyGl.sf.duration").value_or(mSfDuration),
-                     getProperty("debug.sf.earlyGl.app.duration").value_or(mAppDuration),
+                     getProperty("debug.sf.early.sf.duration")
+                             .value_or(getProperty("debug.sf.late.sf.duration").value_or(-1)),
+                     getProperty("debug.sf.early.app.duration")
+                             .value_or(getProperty("debug.sf.late.app.duration").value_or(-1)),
+                     getProperty("debug.sf.earlyGl.sf.duration")
+                             .value_or(getProperty("debug.sf.late.sf.duration").value_or(-1)),
+                     getProperty("debug.sf.earlyGl.app.duration")
+                             .value_or(getProperty("debug.sf.late.app.duration").value_or(-1)),
                      getProperty("debug.sf.hwc.min.duration").value_or(0)) {
     validateSysprops();
 }

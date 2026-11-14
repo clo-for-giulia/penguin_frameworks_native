@@ -19,7 +19,7 @@
  *
 // QTI_END: 2023-01-17: Display: sf: Introduce QTI Extensions in AOSP
 // QTI_BEGIN: 2025-04-11: Display: sf: update layer class setting with LayerFE objects
- * Copyright (c) 2023-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 // QTI_END: 2025-04-11: Display: sf: update layer class setting with LayerFE objects
 // QTI_BEGIN: 2023-01-17: Display: sf: Introduce QTI Extensions in AOSP
  * SPDX-License-Identifier: BSD-3-Clause-Clear
@@ -1925,12 +1925,17 @@ void SurfaceFlinger::disableExpensiveRendering() {
     const char* const whence = __func__;
     auto future = mScheduler->schedule([=, this]() FTL_FAKE_GUARD(mStateLock) {
         SFTRACE_NAME(whence);
+        // A newer composite asked for it again and re-armed the expiry timer
+        if (mPowerAdvisor->isExpensiveRenderingHeld()) {
+            return;
+        }
         if (mPowerAdvisor->isUsingExpensiveRendering()) {
             for (const auto& [_, display] : mDisplays) {
                 constexpr bool kDisable = false;
                 mPowerAdvisor->setExpensiveRenderingExpected(display->getId(), kDisable);
             }
         }
+        mPowerAdvisor->expireExpensiveRendering();
     });
 
     future.wait();
@@ -1990,6 +1995,8 @@ status_t SurfaceFlinger::setActiveColorMode(const sp<IBinder>& displayToken, ui:
 
         display->getCompositionDisplay()->setColorProfile(
                 {mode, Dataspace::UNKNOWN, RenderIntent::COLORIMETRIC});
+        mContentGeneration++;
+        scheduleSample();
 
         return NO_ERROR;
     });
@@ -2493,6 +2500,9 @@ status_t SurfaceFlinger::setDisplayBrightness(const sp<IBinder>& displayToken,
                        FTL_FAKE_GUARD(kMainThreadContext,
                                       display->updateHdrSdrRatioOverlayRatio(currentHdrSdrRatio));
 
+                       // Screenshots, and so region sampling, depend on the brightness
+                       mContentGeneration++;
+                       scheduleSample();
                        if (brightness.sdrWhitePointNits / brightness.displayBrightnessNits !=
                            currentDimmingRatio) {
                            scheduleComposite(FrameHint::kNone);
@@ -2621,6 +2631,7 @@ void SurfaceFlinger::scheduleComposite(FrameHint hint) {
 
 void SurfaceFlinger::scheduleRepaint() {
     mGeometryDirty = true;
+    mContentGeneration++;
     scheduleComposite(FrameHint::kActive);
 }
 
@@ -3371,10 +3382,14 @@ bool SurfaceFlinger::commit(PhysicalDisplayId pacesetterId,
 
         const bool flushTransactions = clearTransactionFlags(eTransactionFlushNeeded);
         bool transactionsAreEmpty = false;
-        mustComposite |=
+        const bool contentChanged =
                 updateLayerSnapshots(vsyncId, pacesetterFrameTargetPtr->frameBeginTime().ns(),
                                      pacesetterFrameTargetPtr->expectedPresentTime().ns(),
                                      flushTransactions, transactionsAreEmpty);
+        if (contentChanged) {
+            mContentGeneration++;
+        }
+        mustComposite |= contentChanged;
 
         // A display transaction for hotplug reconnect may have just destroyed the original.
         pacesetterFrameTargetPtr = mScheduler->pacesetterFrameTarget();
@@ -10068,7 +10083,7 @@ void SurfaceFlinger::sample() {
     const auto scheduleFrameTimeOpt = scheduledFrameResultOpt
             ? std::optional{scheduledFrameResultOpt->callbackTime}
             : std::nullopt;
-    mRegionSamplingThread->onCompositionComplete(scheduleFrameTimeOpt);
+    mRegionSamplingThread->onCompositionComplete(scheduleFrameTimeOpt, mContentGeneration);
 }
 
 sp<DisplayDevice> SurfaceFlinger::findFrontInternalDisplay() const FTL_FAKE_GUARD(mStateLock) {
@@ -10088,6 +10103,8 @@ void SurfaceFlinger::onNewFrontInternalDisplay(const DisplayDevice* oldFrontInte
     SFTRACE_CALL();
 
     mFrontInternalDisplayId = newFrontInternalDisplay.getPhysicalId();
+    // Region sampling captures the front internal display
+    mContentGeneration++;
 
     mFrontInternalDisplayTransformHint = newFrontInternalDisplay.getTransformHint();
     sFrontInternalDisplayRotationFlags =
@@ -10300,7 +10317,10 @@ std::vector<std::pair<Layer*, LayerFE*>> SurfaceFlinger::addLayerSnapshotsToComp
 // QTI_END: 2025-04-11: Display: sf: update layer class setting with LayerFE objects
 // QTI_BEGIN: 2025-01-07: Display: sf: Update LayerFE's composition state before composition
                 snapshot->qtiIsSecureDisplay =  legacyLayer->qtiIsSecureDisplay();
-                snapshot->qtiIsSecureCamera = legacyLayer->qtiIsSecureCamera();
+                snapshot->qtiIsSecureCamera = (snapshot->externalTexture != nullptr)
+                        ? mQtiSFExtnIntf->qtiIsSecureCamera(
+                                  snapshot->externalTexture->getBuffer())
+                        : legacyLayer->qtiIsSecureCamera();
 // QTI_END: 2025-01-07: Display: sf: Update LayerFE's composition state before composition
                 layerFE->mSnapshot = std::move(snapshot);
                 refreshArgs.layers.push_back(layerFE);
